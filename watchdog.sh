@@ -58,13 +58,72 @@ restart_docker() {
   return 1
 }
 
-restart_orbstack() {
-  log "escalating recovery: restarting OrbStack machines with: orb restart --all"
-  if run_with_timeout "$ORBSTACK_RESTART_TIMEOUT" /opt/homebrew/bin/orb restart --all >> "$LOG_FILE" 2>&1; then
-    log "OrbStack restart command completed"
+force_restart_stack() {
+  log "escalating recovery: terminating OrbStack and Docker process family"
+  /usr/bin/python3 - >> "$LOG_FILE" 2>&1 <<'PY'
+import os
+import signal
+import subprocess
+import time
+
+self_pid = os.getpid()
+watchdog_marker = "orbstack-docker-watchdog"
+targets = {"docker", "dockerd", "containerd", "OrbStack"}
+
+def processes():
+    result = subprocess.run(
+        ["/bin/ps", "-axo", "pid=,comm=,args="],
+        capture_output=True, text=True, check=False,
+    )
+    found = []
+    for line in result.stdout.splitlines():
+        parts = line.strip().split(None, 2)
+        if len(parts) != 3:
+            continue
+        try:
+            pid = int(parts[0])
+        except ValueError:
+            continue
+        comm, args = parts[1], parts[2]
+        if pid in {self_pid, os.getpid()} or watchdog_marker in args:
+            continue
+        is_orbstack = "/OrbStack.app/Contents/" in args or " vmgr " in f" {args} " or " scon " in f" {args} "
+        is_docker = comm in targets or "/docker-compose" in args or " docker compose " in f" {args} "
+        if is_orbstack or is_docker:
+            found.append((pid, comm, args))
+    return found
+
+initial = processes()
+for pid, comm, args in initial:
+    try:
+        os.kill(pid, signal.SIGTERM)
+        print(f"sent SIGTERM pid={pid} comm={comm}")
+    except ProcessLookupError:
+        pass
+    except PermissionError as error:
+        print(f"could not terminate pid={pid}: {error}")
+
+time.sleep(8)
+remaining = processes()
+for pid, comm, args in remaining:
+    try:
+        os.kill(pid, signal.SIGKILL)
+        print(f"sent SIGKILL pid={pid} comm={comm}")
+    except ProcessLookupError:
+        pass
+    except PermissionError as error:
+        print(f"could not force-kill pid={pid}: {error}")
+
+print(f"terminated {len(initial)} process(es); force-killed {len(remaining)} remaining process(es)")
+PY
+
+  log "reopening OrbStack"
+  /usr/bin/open -a OrbStack >> "$LOG_FILE" 2>&1 || log "could not open OrbStack"
+  if run_with_timeout "$ORBSTACK_RESTART_TIMEOUT" /opt/homebrew/bin/orb start docker >> "$LOG_FILE" 2>&1; then
+    log "OrbStack reopened and Docker start command completed"
     return 0
   fi
-  log "OrbStack restart command failed or timed out"
+  log "OrbStack reopened but Docker start command failed or timed out"
   return 1
 }
 
@@ -119,7 +178,7 @@ while true; do
       restart_docker || true
     elif (( docker_restart_attempted == 1 && orbstack_restart_attempted == 0 && now - docker_restart_at >= RESTART_ESCALATION_DELAY )); then
       orbstack_restart_attempted=1
-      restart_orbstack || true
+      force_restart_stack || true
     fi
   fi
   sleep "$CHECK_INTERVAL"
