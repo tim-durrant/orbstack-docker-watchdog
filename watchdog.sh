@@ -2,7 +2,9 @@
 set -u
 
 # Lightweight macOS watchdog for the OrbStack Docker engine.
-# Three consecutive failed health checks trigger one Docker-engine restart.
+# Three consecutive failed health checks trigger a Docker-engine restart. If
+# Docker remains unhealthy for five minutes after that attempt, OrbStack is
+# restarted as a second-level recovery action.
 
 PATH="/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin"
 export PATH
@@ -10,10 +12,11 @@ export PATH
 CHECK_INTERVAL="${WATCHDOG_CHECK_INTERVAL:-60}"
 FAILURE_THRESHOLD="${WATCHDOG_FAILURE_THRESHOLD:-3}"
 COMMAND_TIMEOUT="${WATCHDOG_COMMAND_TIMEOUT:-20}"
-RESTART_COOLDOWN="${WATCHDOG_RESTART_COOLDOWN:-3600}"
+RESTART_ESCALATION_DELAY="${WATCHDOG_RESTART_ESCALATION_DELAY:-300}"
+DOCKER_RESTART_TIMEOUT="${WATCHDOG_DOCKER_RESTART_TIMEOUT:-60}"
+ORBSTACK_RESTART_TIMEOUT="${WATCHDOG_ORBSTACK_RESTART_TIMEOUT:-120}"
 LOG_FILE="${WATCHDOG_LOG_FILE:-$HOME/Library/Logs/orbstack-docker-watchdog.log}"
 STATE_DIR="${WATCHDOG_STATE_DIR:-$HOME/Library/Application Support/OrbStack Docker Watchdog}"
-LAST_RESTART_FILE="$STATE_DIR/last-restart"
 
 mkdir -p "$STATE_DIR" "$(dirname "$LOG_FILE")"
 
@@ -45,27 +48,23 @@ healthy() {
   run_with_timeout "$COMMAND_TIMEOUT" /usr/local/bin/docker version --format '{{.Server.Version}}' >/dev/null 2>&1
 }
 
-restart_allowed() {
-  [[ ! -f "$LAST_RESTART_FILE" ]] && return 0
-  local last now
-  last="$(cat "$LAST_RESTART_FILE" 2>/dev/null || echo 0)"
-  now="$(date +%s)"
-  (( now - last >= RESTART_COOLDOWN ))
-}
-
 restart_docker() {
-  if ! restart_allowed; then
-    log "restart suppressed: cooldown is active"
-    return 1
-  fi
-
-  date +%s > "$LAST_RESTART_FILE"
   log "restarting Docker engine with: orb restart docker"
-  if run_with_timeout 60 /opt/homebrew/bin/orb restart docker >> "$LOG_FILE" 2>&1; then
+  if run_with_timeout "$DOCKER_RESTART_TIMEOUT" /opt/homebrew/bin/orb restart docker >> "$LOG_FILE" 2>&1; then
     log "restart command completed"
     return 0
   fi
   log "restart command failed or timed out"
+  return 1
+}
+
+restart_orbstack() {
+  log "escalating recovery: restarting OrbStack with: orb restart"
+  if run_with_timeout "$ORBSTACK_RESTART_TIMEOUT" /opt/homebrew/bin/orb restart >> "$LOG_FILE" 2>&1; then
+    log "OrbStack restart command completed"
+    return 0
+  fi
+  log "OrbStack restart command failed or timed out"
   return 1
 }
 
@@ -90,20 +89,37 @@ if [[ "${1:-}" == "--dry-run" ]]; then
   exit $?
 fi
 
-log "started: interval=${CHECK_INTERVAL}s threshold=${FAILURE_THRESHOLD} timeout=${COMMAND_TIMEOUT}s cooldown=${RESTART_COOLDOWN}s"
+log "started: interval=${CHECK_INTERVAL}s threshold=${FAILURE_THRESHOLD} timeout=${COMMAND_TIMEOUT}s OrbStack escalation=${RESTART_ESCALATION_DELAY}s"
 failures=0
+incident_started_at=0
+docker_restart_at=0
+docker_restart_attempted=0
+orbstack_restart_attempted=0
 while true; do
   if healthy; then
     if (( failures > 0 )); then
       log "health recovered after $failures failed check(s)"
     fi
     failures=0
+    incident_started_at=0
+    docker_restart_at=0
+    docker_restart_attempted=0
+    orbstack_restart_attempted=0
   else
+    now="$(date +%s)"
+    if (( incident_started_at == 0 )); then
+      incident_started_at="$now"
+      log "health incident started"
+    fi
     failures=$((failures + 1))
     log "failed health check $failures/$FAILURE_THRESHOLD"
-    if (( failures >= FAILURE_THRESHOLD )); then
+    if (( failures >= FAILURE_THRESHOLD && docker_restart_attempted == 0 )); then
+      docker_restart_attempted=1
+      docker_restart_at="$now"
       restart_docker || true
-      failures=0
+    elif (( docker_restart_attempted == 1 && orbstack_restart_attempted == 0 && now - docker_restart_at >= RESTART_ESCALATION_DELAY )); then
+      orbstack_restart_attempted=1
+      restart_orbstack || true
     fi
   fi
   sleep "$CHECK_INTERVAL"
