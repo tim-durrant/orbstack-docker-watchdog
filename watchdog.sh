@@ -59,8 +59,8 @@ restart_docker() {
 }
 
 restart_orbstack() {
-  log "escalating recovery: restarting OrbStack with: orb restart"
-  if run_with_timeout "$ORBSTACK_RESTART_TIMEOUT" /opt/homebrew/bin/orb restart >> "$LOG_FILE" 2>&1; then
+  log "escalating recovery: restarting OrbStack machines with: orb restart --all"
+  if run_with_timeout "$ORBSTACK_RESTART_TIMEOUT" /opt/homebrew/bin/orb restart --all >> "$LOG_FILE" 2>&1; then
     log "OrbStack restart command completed"
     return 0
   fi

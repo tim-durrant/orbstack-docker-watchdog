@@ -9,7 +9,7 @@ Behavior:
 - Requires three consecutive failed checks.
 - Runs `orb restart docker` after the third failure.
 - If Docker remains unhealthy for five minutes after that attempt, runs
-  `orb restart` to restart OrbStack itself.
+  `orb restart --all` to restart all OrbStack machines, including Docker.
 - Times out health checks after 20 seconds, Docker-engine restarts after 60
   seconds, and OrbStack restarts after 120 seconds.
 - Limits each recovery action to once per health incident and resets the
