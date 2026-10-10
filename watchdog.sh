@@ -11,7 +11,8 @@ export PATH
 
 CHECK_INTERVAL="${WATCHDOG_CHECK_INTERVAL:-60}"
 FAILURE_THRESHOLD="${WATCHDOG_FAILURE_THRESHOLD:-3}"
-COMMAND_TIMEOUT="${WATCHDOG_COMMAND_TIMEOUT:-20}"
+DOCKER_HEALTH_TIMEOUT="${WATCHDOG_DOCKER_HEALTH_TIMEOUT:-20}"
+ORBSTACK_HEALTH_TIMEOUT="${WATCHDOG_ORBSTACK_HEALTH_TIMEOUT:-10}"
 RESTART_ESCALATION_DELAY="${WATCHDOG_RESTART_ESCALATION_DELAY:-300}"
 DOCKER_RESTART_TIMEOUT="${WATCHDOG_DOCKER_RESTART_TIMEOUT:-60}"
 ORBSTACK_RESTART_TIMEOUT="${WATCHDOG_ORBSTACK_RESTART_TIMEOUT:-120}"
@@ -44,8 +45,33 @@ sys.exit(result.returncode)
 PY
 }
 
-healthy() {
-  run_with_timeout "$COMMAND_TIMEOUT" /usr/local/bin/docker version --format '{{.Server.Version}}' >/dev/null 2>&1
+health_check() {
+  local started_at docker_info orb_status elapsed
+  started_at="$(date +%s)"
+
+  if ! docker_info="$(run_with_timeout "$DOCKER_HEALTH_TIMEOUT" /usr/local/bin/docker info --format '{{.ServerVersion}}' 2>&1)"; then
+    docker_info="${docker_info//$'\n'/ }"
+    log "health check failed: Docker API unavailable (${docker_info:-no response})"
+    return 1
+  fi
+
+  if ! orb_status="$(run_with_timeout "$ORBSTACK_HEALTH_TIMEOUT" /opt/homebrew/bin/orb status 2>&1)"; then
+    orb_status="${orb_status//$'\n'/ }"
+    log "health check failed: OrbStack status unavailable (${orb_status:-no response})"
+    return 1
+  fi
+
+  if [[ "$orb_status" != *Running* ]]; then
+    orb_status="${orb_status//$'\n'/ }"
+    log "health check failed: OrbStack status is not Running (${orb_status:-empty response})"
+    return 1
+  fi
+
+  elapsed=$(( $(date +%s) - started_at ))
+  docker_info="${docker_info//$'\n'/ }"
+  orb_status="${orb_status//$'\n'/ }"
+  log "health check healthy: Docker=${docker_info:-unknown} OrbStack=${orb_status} duration=${elapsed}s"
+  return 0
 }
 
 restart_docker() {
@@ -128,13 +154,7 @@ PY
 }
 
 run_once() {
-  if healthy; then
-    log "health check: healthy"
-    return 0
-  fi
-
-  log "health check: failed"
-  return 1
+  health_check
 }
 
 if [[ "${1:-}" == "--once" ]]; then
@@ -143,19 +163,19 @@ if [[ "${1:-}" == "--once" ]]; then
 fi
 
 if [[ "${1:-}" == "--dry-run" ]]; then
-  log "dry run: checking Docker health; restart would require $FAILURE_THRESHOLD consecutive failures"
+  log "dry run: checking Docker and OrbStack health; restart would require $FAILURE_THRESHOLD consecutive failures"
   run_once
   exit $?
 fi
 
-log "started: interval=${CHECK_INTERVAL}s threshold=${FAILURE_THRESHOLD} timeout=${COMMAND_TIMEOUT}s OrbStack escalation=${RESTART_ESCALATION_DELAY}s"
+log "started: interval=${CHECK_INTERVAL}s threshold=${FAILURE_THRESHOLD} Docker timeout=${DOCKER_HEALTH_TIMEOUT}s OrbStack timeout=${ORBSTACK_HEALTH_TIMEOUT}s escalation=${RESTART_ESCALATION_DELAY}s"
 failures=0
 incident_started_at=0
 docker_restart_at=0
 docker_restart_attempted=0
 orbstack_restart_attempted=0
 while true; do
-  if healthy; then
+  if health_check; then
     if (( failures > 0 )); then
       log "health recovered after $failures failed check(s)"
     fi

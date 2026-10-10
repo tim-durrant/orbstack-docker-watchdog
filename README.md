@@ -5,7 +5,9 @@ OrbStack Docker engine.
 
 Behavior:
 
-- Checks `docker version` every 60 seconds.
+- Checks Docker’s API with `docker info` every 60 seconds.
+- Checks OrbStack’s own state with `orb status` on the same interval.
+- Applies independent timeouts to both checks and logs which layer failed.
 - Requires three consecutive failed checks.
 - Runs `orb restart docker` after the third failure.
 - If Docker remains unhealthy for five minutes after that attempt, runs
@@ -50,6 +52,7 @@ launchd plist uses the safe defaults unless explicitly extended with an
 The installer expands the local project path into the installed LaunchAgent,
 so the repository can be cloned into any directory before installation.
 
-The escalation delay and command timeouts can be overridden for testing with
+The health-check and escalation timeouts can be overridden for testing with
+`WATCHDOG_DOCKER_HEALTH_TIMEOUT`, `WATCHDOG_ORBSTACK_HEALTH_TIMEOUT`,
 `WATCHDOG_RESTART_ESCALATION_DELAY`, `WATCHDOG_DOCKER_RESTART_TIMEOUT`, and
 `WATCHDOG_ORBSTACK_RESTART_TIMEOUT`.
